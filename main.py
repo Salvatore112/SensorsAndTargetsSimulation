@@ -356,7 +356,6 @@ class Simulation:
         all_x = []
         all_y = []
         for obj in self.targets:
-            # Compute all positions on-demand for setting bounds
             positions = [self.get_target_position(obj, t) for t in time_points]
             all_x.extend([p[0] for p in positions])
             all_y.extend([p[1] for p in positions])
