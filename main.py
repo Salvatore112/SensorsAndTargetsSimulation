@@ -8,7 +8,7 @@ import pickle
 
 from matplotlib.animation import FuncAnimation, PillowWriter
 from dataclasses import dataclass
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 
 @dataclass
@@ -16,6 +16,8 @@ class Target:
     id: int
     initial_position: Tuple[float, float]
     velocity: Tuple[float, float]
+    movement_type: str = "linear"
+    random_walk_params: Optional[Dict] = None
 
 
 @dataclass
@@ -47,10 +49,16 @@ class Simulation:
         obj_id: int,
         initial_position: Tuple[float, float],
         velocity: Tuple[float, float],
+        movement_type: str = "linear",
+        random_walk_params: Optional[Dict] = None,
     ):
-        self.targets.append(Target(obj_id, initial_position, velocity))
+        self.targets.append(
+            Target(
+                obj_id, initial_position, velocity, movement_type, random_walk_params
+            )
+        )
 
-    def add_uniform_target(self, obj_id: int, area_size: float = 50):
+    def add_linear_target(self, obj_id: int, area_size: float = 50):
         initial_x = random.uniform(-area_size, area_size)
         initial_y = random.uniform(-area_size, area_size)
 
@@ -59,7 +67,35 @@ class Simulation:
         vx = speed * math.cos(angle)
         vy = speed * math.sin(angle)
 
-        self.targets.append(Target(obj_id, (initial_x, initial_y), (vx, vy)))
+        self.targets.append(
+            Target(obj_id, (initial_x, initial_y), (vx, vy), "linear", None)
+        )
+        return (initial_x, initial_y), (vx, vy)
+
+    def add_random_walk_target(self, obj_id: int, area_size: float = 50):
+        initial_x = random.uniform(-area_size, area_size)
+        initial_y = random.uniform(-area_size, area_size)
+
+        speed = random.uniform(0.5, 2.0)
+        angle = random.uniform(0, 2 * math.pi)
+        vx = speed * math.cos(angle)
+        vy = speed * math.sin(angle)
+
+        random_walk_params = {
+            "speed_variation": random.uniform(0.1, 0.5),
+            "direction_change_prob": random.uniform(0.1, 0.3),
+            "max_direction_change": math.pi / 4,
+        }
+
+        self.targets.append(
+            Target(
+                obj_id,
+                (initial_x, initial_y),
+                (vx, vy),
+                "random_walk",
+                random_walk_params,
+            )
+        )
         return (initial_x, initial_y), (vx, vy)
 
     def add_uniform_sensor(self, sensor_id: int, area_size: float = 50):
@@ -75,8 +111,61 @@ class Simulation:
         return math.sqrt((pos1[0] - pos2[0]) ** 2 + (pos1[1] - pos2[1]) ** 2)
 
     def get_target_position(self, obj: Target, time: float) -> Tuple[float, float]:
+        if obj.movement_type == "linear":
+            return self._get_linear_position(obj, time)
+        elif obj.movement_type == "random_walk":
+            return self._get_random_walk_position(obj, time)
+        else:
+            return self._get_linear_position(obj, time)
+
+    def _get_linear_position(self, obj: Target, time: float) -> Tuple[float, float]:
         x = obj.initial_position[0] + obj.velocity[0] * time
         y = obj.initial_position[1] + obj.velocity[1] * time
+        return (x, y)
+
+    def _get_random_walk_position(
+        self, obj: Target, time: float
+    ) -> Tuple[float, float]:
+        if not hasattr(obj, "_rng"):
+            obj._rng = random.Random(obj.id)
+            obj._cached_positions = {0: obj.initial_position}
+            obj._cached_velocity = obj.velocity
+
+        if time in obj._cached_positions:
+            return obj._cached_positions[time]
+
+        last_time = max(t for t in obj._cached_positions.keys() if t <= time)
+        x, y = obj._cached_positions[last_time]
+        current_vx, current_vy = obj._cached_velocity
+        params = obj.random_walk_params
+
+        time_points = np.arange(
+            last_time + self.time_step, time + self.time_step, self.time_step
+        )
+
+        for t in time_points:
+            if obj._rng.random() < params["direction_change_prob"]:
+                angle_change = obj._rng.uniform(
+                    -params["max_direction_change"], params["max_direction_change"]
+                )
+                current_speed = math.sqrt(current_vx**2 + current_vy**2)
+                current_angle = math.atan2(current_vy, current_vx)
+                new_angle = current_angle + angle_change
+
+                speed_variation = obj._rng.uniform(
+                    1 - params["speed_variation"], 1 + params["speed_variation"]
+                )
+                new_speed = current_speed * speed_variation
+
+                current_vx = new_speed * math.cos(new_angle)
+                current_vy = new_speed * math.sin(new_angle)
+
+            x += current_vx * self.time_step
+            y += current_vy * self.time_step
+
+            obj._cached_positions[t] = (x, y)
+            obj._cached_velocity = (current_vx, current_vy)
+
         return (x, y)
 
     def run_simulation(self):
@@ -149,7 +238,7 @@ class Simulation:
                 y_vals,
                 color=color,
                 linewidth=2,
-                label=f"Target {obj.id}",
+                label=f"Target {obj.id} ({obj.movement_type})",
                 alpha=0.7,
             )
 
@@ -174,7 +263,7 @@ class Simulation:
                 label=f"Target {obj.id} finish",
             )
 
-            if len(positions) > 1:
+            if len(positions) > 1 and obj.movement_type == "linear":
                 mid_idx = len(positions) // 2
                 plt.annotate(
                     "",
@@ -259,7 +348,7 @@ class Simulation:
             ax.text(
                 obj.initial_position[0],
                 obj.initial_position[1],
-                f"O{obj.id}",
+                f"O{obj.id}({obj.movement_type[0]})",
                 fontsize=10,
                 fontweight="bold",
             )
@@ -342,6 +431,13 @@ class Simulation:
 
     def save_simulation(self, filename: str = "simulation_data.pkl"):
         filepath = os.path.join(self.output_dir, filename)
+        for target in self.targets:
+            if hasattr(target, "_cached_positions"):
+                target._cached_positions = {}
+            if hasattr(target, "_cached_velocity"):
+                delattr(target, "_cached_velocity")
+            if hasattr(target, "_rng"):
+                delattr(target, "_rng")
         with open(filepath, "wb") as f:
             pickle.dump(
                 {
@@ -378,9 +474,12 @@ class Simulation:
             )
         print("\nTargets:")
         for obj in self.targets:
+            movement_info = f", movement: {obj.movement_type}"
+            if obj.movement_type == "random_walk" and obj.random_walk_params:
+                movement_info += f", params: {obj.random_walk_params}"
             print(
                 f"  Target {obj.id}: initial position ({obj.initial_position[0]:.1f}, {obj.initial_position[1]:.1f}), "
-                f"velocity ({obj.velocity[0]:.2f}, {obj.velocity[1]:.2f})"
+                f"velocity ({obj.velocity[0]:.2f}, {obj.velocity[1]:.2f}){movement_info}"
             )
 
 
@@ -392,12 +491,20 @@ if __name__ == "__main__":
         pos = sim.add_uniform_sensor(i, area_size=30)
         print(f"Sensor {i}: position ({pos[0]:.1f}, {pos[1]:.1f})")
 
-    print("\nAdding random targets...")
-    for i in range(1, 6):
-        init_pos, velocity = sim.add_uniform_target(i, area_size=30)
+    print("\nAdding linear targets...")
+    for i in range(1, 4):
+        init_pos, velocity = sim.add_linear_target(i, area_size=30)
         print(
-            f"Target {i}: initial position ({init_pos[0]:.1f}, {init_pos[1]:.1f}), "
+            f"Linear Target {i}: initial position ({init_pos[0]:.1f}, {init_pos[1]:.1f}), "
             f"velocity ({velocity[0]:.2f}, {velocity[1]:.2f})"
+        )
+
+    print("\nAdding random walk targets...")
+    for i in range(4, 6):
+        init_pos, velocity = sim.add_random_walk_target(i, area_size=30)
+        print(
+            f"Random Walk Target {i}: initial position ({init_pos[0]:.1f}, {init_pos[1]:.1f}), "
+            f"initial velocity ({velocity[0]:.2f}, {velocity[1]:.2f})"
         )
 
     sim.run_simulation()
@@ -427,9 +534,39 @@ if __name__ == "__main__":
     random_times = [random.randint(0, 50) for _ in range(3)]
     for time in random_times:
         distance1 = sim.get_distance(1, 1, time)
-        distance2 = sim.get_distance(2, 3, time)
+        distance2 = sim.get_distance(2, 4, time)
         print(
-            f"Time t={time}: Sensor1->Target1: {distance1:.2f}, Sensor2->Target3: {distance2:.2f}"
+            f"Time t={time}: Sensor1->Target1(linear): {distance1:.2f}, Sensor2->Target4(random): {distance2:.2f}"
+        )
+
+    print("\n" + "=" * 50)
+    print("DETAILED DISTANCE ANALYSIS - RANDOM WALK TARGETS")
+    print("=" * 50)
+
+    times_to_check = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50]
+
+    print("\nRandom Walk Target 4 distances over time:")
+    print("Time | Sensor1 | Sensor2 | Sensor3 | Target Position")
+    print("-" * 65)
+    for time in times_to_check:
+        dist1 = sim.get_distance(1, 4, time)
+        dist2 = sim.get_distance(2, 4, time)
+        dist3 = sim.get_distance(3, 4, time)
+        pos = sim.get_target_position_at_time(4, time)
+        print(
+            f"{time:4.1f} | {dist1:7.2f} | {dist2:7.2f} | {dist3:7.2f} | ({pos[0]:6.1f}, {pos[1]:6.1f})"
+        )
+
+    print("\nRandom Walk Target 5 distances over time:")
+    print("Time | Sensor1 | Sensor2 | Sensor3 | Target Position")
+    print("-" * 65)
+    for time in times_to_check:
+        dist1 = sim.get_distance(1, 5, time)
+        dist2 = sim.get_distance(2, 5, time)
+        dist3 = sim.get_distance(3, 5, time)
+        pos = sim.get_target_position_at_time(5, time)
+        print(
+            f"{time:4.1f} | {dist1:7.2f} | {dist2:7.2f} | {dist3:7.2f} | ({pos[0]:6.1f}, {pos[1]:6.1f})"
         )
 
     print("\n" + "=" * 50)
@@ -439,3 +576,4 @@ if __name__ == "__main__":
     new_sim = Simulation(duration=10, time_step=1.0)
     new_sim.load_simulation()
     new_sim.print_simulation_info()
+    print(sim.get_target_position_at_time(4, 50))
